@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="750" viewBox="0 0 1200 750" role="img" aria-label="少买工具，多把一件小事做完">
+  <rect width="1200" height="750" fill="#f3ebe0"/>
+  <rect x="0" y="0" width="1200" height="22" fill="#c2502a"/>
+  <rect x="90" y="120" width="420" height="510" fill="#fffdf8" stroke="#1f1a14" stroke-width="2"/>
+  <path d="M120 210 H 480 M 120 270 H 420 M 120 330 H 460 M 120 390 H 390 M 120 450 H 450 M 120 510 H 360" stroke="#d7c8b6" stroke-width="3"/>
+  <rect x="150" y="560" width="86" height="10" fill="#c2502a"/>
+  <circle cx="860" cy="300" r="150" fill="none" stroke="#1f1a14" stroke-width="2"/>
+  <path d="M800 300 L 845 345 L 930 250" fill="none" stroke="#c2502a" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="620" y="560" fill="#1f1a14" font-family="STSong, 'Songti SC', 'Noto Serif SC', serif" font-size="64">做完</text>
+  <text x="90" y="96" fill="#8a7d70" font-family="Georgia, 'Times New Roman', serif" font-size="18" letter-spacing="6">FINISH ONE THING</text>
+</svg>

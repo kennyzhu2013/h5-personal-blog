@@ -1,0 +1,13 @@
+node_modules/
+.env
+client/dist/
+data/blog.db
+data/blog.db-wal
+data/blog.db-shm
+data/posts/
+data/covers/
+data/.initialized
+*.log
+.DS_Store
+data/revisions/
+data/tmp/

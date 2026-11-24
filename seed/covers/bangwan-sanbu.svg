@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="750" viewBox="0 0 1200 750" role="img" aria-label="傍晚散步时，城市会把声音还给你">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#f1d3b8"/>
+      <stop offset="48%" stop-color="#d98a62"/>
+      <stop offset="100%" stop-color="#7a3d32"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="750" fill="url(#sky)"/>
+  <circle cx="880" cy="210" r="70" fill="#f6e2c6" opacity="0.95"/>
+  <path d="M0 470 C 180 430, 300 520, 480 500 C 680 478, 820 560, 1200 520 L 1200 750 L 0 750 Z" fill="#4a2f2a" opacity="0.55"/>
+  <path d="M0 540 C 220 510, 390 600, 620 570 C 860 538, 980 620, 1200 590 L 1200 750 L 0 750 Z" fill="#2b1c19"/>
+  <path d="M0 628 H 1200" stroke="#e8c9b0" stroke-width="1.4" opacity="0.35"/>
+  <text x="80" y="160" fill="#5a3128" font-family="Georgia, 'Times New Roman', serif" font-size="18" letter-spacing="8">DUSK WALK</text>
+  <text x="80" y="280" fill="#2b1c19" font-family="STSong, 'Songti SC', 'Noto Serif SC', serif" font-size="88">傍晚</text>
+  <text x="80" y="390" fill="#2b1c19" font-family="STSong, 'Songti SC', 'Noto Serif SC', serif" font-size="88">散步</text>
+</svg>

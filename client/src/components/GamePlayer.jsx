@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import HeartButton from "./HeartButton.jsx";
+import ThemeToggle from "./ThemeToggle.jsx";
 
 const GAME_SANDBOX = "allow-scripts allow-popups allow-popups-to-escape-sandbox allow-pointer-lock allow-fullscreen";
 const GAME_ALLOW = "fullscreen; pointer-lock; gamepad";
@@ -82,6 +83,7 @@ export default function GamePlayer({
           </button>
           <div className="game-title" title={title}>{title}</div>
           <div className="game-chrome-actions">
+            <ThemeToggle />
             {!preview ? (
               <HeartButton on={favorited} onToggle={onToggleFavorite} />
             ) : null}

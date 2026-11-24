@@ -23,25 +23,41 @@ async function request(url, options = {}) {
   return data;
 }
 
+function withPage(params, options) {
+  if (options.page) params.set("page", String(options.page));
+  if (options.sort && options.sort !== "published") params.set("sort", options.sort);
+  return params;
+}
+
 export const api = {
   config: () => request("/api/config"),
   posts: (opts) => {
     const options = typeof opts === "string" ? { category: opts } : (opts || {});
-    const params = new URLSearchParams();
+    const params = withPage(new URLSearchParams(), options);
     if (options.category) params.set("category", options.category);
-    if (options.sort && options.sort !== "published") params.set("sort", options.sort);
+    if (options.slugs?.length) params.set("slugs", options.slugs.join(","));
     const query = params.toString();
     return request(query ? `/api/posts?${query}` : "/api/posts");
   },
   categories: () => request("/api/categories"),
   category: (slug, opts = {}) => {
-    const params = new URLSearchParams();
-    if (opts.sort && opts.sort !== "published") params.set("sort", opts.sort);
+    const params = withPage(new URLSearchParams(), opts);
     const query = params.toString();
     const path = `/api/categories/${encodeURIComponent(slug)}`;
     return request(query ? `${path}?${query}` : path);
   },
-  search: (q) => request(`/api/search?q=${encodeURIComponent(q)}`),
+  tag: (name, opts = {}) => {
+    const params = withPage(new URLSearchParams(), opts);
+    const query = params.toString();
+    const path = `/api/tags/${encodeURIComponent(name)}`;
+    return request(query ? `${path}?${query}` : path);
+  },
+  search: (q, opts = {}) => {
+    const params = new URLSearchParams();
+    params.set("q", q);
+    if (opts.page) params.set("page", String(opts.page));
+    return request(`/api/search?${params.toString()}`);
+  },
   post: (slug) => request(`/api/posts/${encodeURIComponent(slug)}`),
   contentUrl: (slug) => `/media/articles/${encodeURIComponent(slug)}/live/`,
   previewContentUrl: (slug, token) => `/media/articles/${encodeURIComponent(slug)}/p/${encodeURIComponent(token)}/`,
@@ -57,6 +73,9 @@ export const api = {
   unpublishPost: (id) => request(`/api/admin/posts/${id}/unpublish`, { method: "POST", body: JSON.stringify({}) }),
   deletePost: (id) => request(`/api/admin/posts/${id}`, { method: "DELETE" }),
   createCategory: (name) => request("/api/admin/categories", { method: "POST", body: JSON.stringify({ name }) }),
+  renameCategory: (id, name) => request(`/api/admin/categories/${id}`, { method: "PATCH", body: JSON.stringify({ name }) }),
+  deleteCategory: (id) => request(`/api/admin/categories/${id}`, { method: "DELETE" }),
+  reorderCategories: (ids) => request("/api/admin/categories/order", { method: "PUT", body: JSON.stringify({ ids }) }),
 };
 
 export function formatReadingTime(minutes) {

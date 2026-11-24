@@ -183,6 +183,19 @@ function tocScript(title) {
 }
 
 
+const THEME_SCRIPT = `
+(function () {
+  window.addEventListener("message", function (event) {
+    if (event.source !== window.parent) return;
+    var data = event.data;
+    if (!data || data.type !== "article-theme") return;
+    if (data.theme === "dark" || data.theme === "light") {
+      document.documentElement.setAttribute("data-theme", data.theme);
+    }
+  });
+})();
+`.trim();
+
 const BASE_STYLE = `
   :root { color-scheme: light; }
   html, body { margin: 0; padding: 0; background: transparent; }
@@ -195,9 +208,14 @@ const BASE_STYLE = `
     word-break: break-word;
     -webkit-font-smoothing: antialiased;
   }
+  html[data-theme="dark"] { color-scheme: dark; }
+  html[data-theme="dark"] body { color: #f3ece3; }
+  html[data-theme="light"] body { color: #1f1a14; }
   img, video, audio, iframe { max-width: 100%; }
   img, video { height: auto; }
   a { color: #c2502a; }
+  html[data-theme="dark"] a { color: #ffb199; }
+  html[data-theme="light"] a { color: #c2502a; }
   figure { margin: 0; }
 `.trim();
 
@@ -348,7 +366,7 @@ function neutralize($) {
  * Turn an uploaded HTML5 document or fragment into a self-contained
  * article document suitable for a sandboxed iframe.
  */
-export function buildArticleDocument(raw, { title = "" } = {}) {
+export function buildArticleDocument(raw, { title = "", theme = "" } = {}) {
   const source = String(raw ?? "");
   const $ = cheerio.load(source, { decodeEntities: false });
 
@@ -382,8 +400,9 @@ export function buildArticleDocument(raw, { title = "" } = {}) {
   }
 
   const safeTitle = String(title || "").replace(/[<>]/g, "");
+  const themeAttr = theme === "dark" || theme === "light" ? ` data-theme="${theme}"` : "";
   const documentHtml = `<!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN"${themeAttr}>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -396,6 +415,7 @@ export function buildArticleDocument(raw, { title = "" } = {}) {
 ${bodyHtml}
 <script id="blog-frame-resize">${RESIZE_SCRIPT}</script>
 <script id="blog-frame-toc">${tocScript(title)}</script>
+<script id="blog-frame-theme">${THEME_SCRIPT}</script>
 </body>
 </html>`;
 

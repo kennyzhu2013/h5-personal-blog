@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
 import { compactText } from "./html.js";
+import { readingMinutesFromHtml, upsertPostSearch } from "./fts.js";
 import {
   ROOT,
   POSTS_DIR,
@@ -86,10 +87,12 @@ export function seedIfNeeded({ force = false } = {}) {
   const insertPost = db.prepare(`
     INSERT INTO posts
       (slug, title, summary, tags, cover_file, html_file, search_text, published,
-       created_at, updated_at, category_id, published_revision_id, draft_revision_id, preview_token)
+       created_at, updated_at, category_id, published_revision_id, draft_revision_id, preview_token,
+       reading_minutes)
     VALUES
       (@slug, @title, @summary, @tags, @cover_file, @html_file, @search_text, 1,
-       @created_at, @updated_at, @category_id, NULL, NULL, @preview_token)
+       @created_at, @updated_at, @category_id, NULL, NULL, @preview_token,
+       @reading_minutes)
   `);
   const updatePost = db.prepare(`
     UPDATE posts SET
@@ -105,7 +108,9 @@ export function seedIfNeeded({ force = false } = {}) {
       category_id = @category_id,
       published_revision_id = @published_revision_id,
       draft_revision_id = @draft_revision_id,
-      preview_token = COALESCE(preview_token, @preview_token)
+      preview_token = COALESCE(preview_token, @preview_token),
+      reading_minutes = @reading_minutes,
+      is_game = 0
     WHERE id = @id
   `);
   const insertRev = db.prepare(`
@@ -129,6 +134,7 @@ export function seedIfNeeded({ force = false } = {}) {
       const raw = fs.readFileSync(htmlSrc, "utf8");
       const search = searchTextOf(post, raw);
       const categoryId = categoryIdFor(post.slug);
+      const categoryName = listCategories().find((item) => item.slug === SEED_CATEGORY_BY_SLUG[post.slug])?.name || "";
       const existing = findPost.get(post.slug);
       const payload = {
         slug: post.slug,
@@ -142,6 +148,7 @@ export function seedIfNeeded({ force = false } = {}) {
         updated_at: nowIso(),
         category_id: categoryId,
         preview_token: existing?.preview_token || newPreviewToken(),
+        reading_minutes: readingMinutesFromHtml(raw, false),
       };
 
       let postId = existing?.id;
@@ -176,6 +183,14 @@ export function seedIfNeeded({ force = false } = {}) {
         id: postId,
         published_revision_id: revId,
         draft_revision_id: revId,
+      });
+      upsertPostSearch(db, {
+        id: postId,
+        title: post.title,
+        summary: post.summary,
+        tags: post.tags.join(" "),
+        category: categoryName,
+        body: compactText(raw),
       });
     }
   });

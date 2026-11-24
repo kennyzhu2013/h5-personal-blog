@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../api.js";
 import PostCard from "../components/PostCard.jsx";
 import EmptyState from "../components/EmptyState.jsx";
+import ThemeToggle from "../components/ThemeToggle.jsx";
 import { useFavorites } from "../hooks/useFavorites.js";
 
 export default function Favorites() {
@@ -10,7 +11,11 @@ export default function Favorites() {
 
   useEffect(() => {
     let cancelled = false;
-    api.posts()
+    if (!slugs.length) {
+      setPosts([]);
+      return undefined;
+    }
+    api.posts({ slugs })
       .then((data) => {
         if (cancelled) return;
         const map = new Map((data.posts || []).map((post) => [post.slug, post]));
@@ -31,6 +36,7 @@ export default function Favorites() {
           <span className="seal">藏</span>
           <div className="brand-name">收藏</div>
         </div>
+        <ThemeToggle />
       </header>
       <main className="page">
         <div className="h-group">

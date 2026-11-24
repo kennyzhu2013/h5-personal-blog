@@ -4,6 +4,15 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#F7F2EA" />
+    <script>
+      try {
+        var pref = localStorage.getItem("h5-blog-theme") || "system";
+        var dark = pref === "dark" || (pref !== "light" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+        document.documentElement.dataset.theme = dark ? "dark" : "light";
+        document.documentElement.dataset.themePref = pref === "light" || pref === "dark" ? pref : "system";
+        document.querySelector('meta[name="theme-color"]').setAttribute("content", dark ? "#12100e" : "#F7F2EA");
+      } catch (e) {}
+    </script>
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <meta name="description" content="个人博客，记录技术与生活。" />

@@ -1,38 +1,28 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api } from "../api.js";
 import PostCard from "../components/PostCard.jsx";
 import EmptyState from "../components/EmptyState.jsx";
+import LoadMore from "../components/LoadMore.jsx";
+import ThemeToggle from "../components/ThemeToggle.jsx";
 import { useFavorites } from "../hooks/useFavorites.js";
+import usePagedList from "../hooks/usePagedList.js";
 
 export default function Search() {
   const { has, toggle } = useFavorites();
   const [query, setQuery] = useState("");
-  const [posts, setPosts] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [searched, setSearched] = useState(false);
+  const [debounced, setDebounced] = useState("");
 
   useEffect(() => {
-    const q = query.trim();
-    if (!q) {
-      setPosts([]);
-      setSearched(false);
-      setError("");
-      return undefined;
-    }
-    const timer = setTimeout(() => {
-      setLoading(true);
-      api.search(q)
-        .then((data) => {
-          setPosts(data.posts || []);
-          setSearched(true);
-          setError("");
-        })
-        .catch((err) => setError(err.message || "搜索失败"))
-        .finally(() => setLoading(false));
-    }, 280);
+    const timer = setTimeout(() => setDebounced(query.trim()), 280);
     return () => clearTimeout(timer);
   }, [query]);
+
+  const loadPage = useCallback((page) => api.search(debounced, { page }), [debounced]);
+  const { posts, loading, loadingMore, error, hasMore, loadMore } = usePagedList(
+    loadPage,
+    [debounced],
+    { enabled: Boolean(debounced) }
+  );
 
   return (
     <>
@@ -41,6 +31,7 @@ export default function Search() {
           <span className="seal">寻</span>
           <div className="brand-name">搜索</div>
         </div>
+        <ThemeToggle />
       </header>
       <main className="page tight">
         <label className="search-box">
@@ -57,26 +48,30 @@ export default function Search() {
           />
         </label>
         {error ? <div className="err">{error}</div> : null}
-        {loading ? <div className="sk-line" /> : null}
-        {!query.trim() ? (
+        {!debounced ? (
           <EmptyState mark="搜" title="找一篇想读的文章">
-            支持搜索标题、摘要、标签和正文。
+            支持搜索标题、摘要、标签和正文，命中的句子会高亮。
           </EmptyState>
-        ) : searched && !loading && posts.length === 0 ? (
-          <EmptyState mark="空" title={`没有找到「${query.trim()}」`}>
+        ) : loading && posts.length === 0 ? (
+          <div className="sk-line" />
+        ) : posts.length === 0 ? (
+          <EmptyState mark="空" title={`没有找到「${debounced}」`}>
             换个关键词试试，或回到首页看看最近的文章。
           </EmptyState>
         ) : (
-          <div className="feed">
-            {posts.map((post) => (
-              <PostCard
-                key={post.slug}
-                post={post}
-                favorited={has(post.slug)}
-                onToggleFavorite={toggle}
-              />
-            ))}
-          </div>
+          <>
+            <div className="feed">
+              {posts.map((post) => (
+                <PostCard
+                  key={post.slug}
+                  post={post}
+                  favorited={has(post.slug)}
+                  onToggleFavorite={toggle}
+                />
+              ))}
+            </div>
+            <LoadMore hasMore={hasMore} loading={loadingMore} onLoad={loadMore} />
+          </>
         )}
       </main>
     </>

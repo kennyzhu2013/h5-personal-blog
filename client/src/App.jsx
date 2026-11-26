@@ -5,6 +5,7 @@ import Category from "./pages/Category.jsx";
 import Search from "./pages/Search.jsx";
 import Favorites from "./pages/Favorites.jsx";
 import PostDetail from "./pages/PostDetail.jsx";
+import Tag from "./pages/Tag.jsx";
 import Admin from "./pages/admin/Admin.jsx";
 import EmptyState from "./components/EmptyState.jsx";
 
@@ -41,6 +42,7 @@ export default function App() {
       <Route element={<ReaderLayout />}>
         <Route path="/" element={<Home />} />
         <Route path="/c/:slug" element={<Category />} />
+        <Route path="/tag/:name" element={<Tag />} />
         <Route path="/search" element={<Search />} />
         <Route path="/favorites" element={<Favorites />} />
       </Route>

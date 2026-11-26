@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, formatDateTime, statusClass, statusLabel } from "../../api.js";
 import { useConfig } from "../../hooks/useConfig.js";
+import CategoryManager from "../../components/CategoryManager.jsx";
+import ThemeToggle from "../../components/ThemeToggle.jsx";
 
 const emptyForm = {
   title: "",
@@ -491,6 +493,7 @@ export default function Admin() {
                   <div className="brand-name" style={{ fontSize: 24 }}>文章管理</div>
                 </div>
                 <div className="btn-row" style={{ marginTop: 0 }}>
+                  <ThemeToggle />
                   <button className="btn ghost" type="button" onClick={onLock}>退出</button>
                   <button className="btn" type="button" onClick={startCreate}>写文章</button>
                 </div>
@@ -498,6 +501,21 @@ export default function Admin() {
               <main className="page">
                 {error ? <div className="err">{error}</div> : null}
                 {notice ? <div className="okmsg">{notice}</div> : null}
+                <CategoryManager
+                  categories={categories}
+                  onUpdated={(next) => {
+                    setCategories(next);
+                    loadPosts().catch(() => {});
+                  }}
+                  onNotice={(message) => {
+                    setNotice(message);
+                    showToast(message);
+                  }}
+                  onError={(message) => {
+                    setError(message);
+                    if (message) showToast(message, "error");
+                  }}
+                />
                 {posts.length === 0 ? (
                   <div className="empty">
                     <div className="empty-mark">新</div>

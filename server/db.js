@@ -3,6 +3,13 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
+import { compactText } from "./html.js";
+import {
+  ensureFts,
+  readingMinutesFromHtml,
+  removePostSearch,
+  upsertPostSearch,
+} from "./fts.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const ROOT = path.resolve(__dirname, "..");
@@ -200,15 +207,63 @@ function migrate(database) {
     assignSeedCategories(database);
   }
   migrateTo3(database);
+  migrateTo4(database);
+}
+
+function readStoredHtml(revisionId) {
+  if (!revisionId) return "";
+  const file = path.join(REVISIONS_DIR, String(revisionId), "index.html");
+  try {
+    return fs.readFileSync(file, "utf8");
+  } catch {
+    return "";
+  }
+}
+
+function migrateTo4(database) {
+  const version = Number(database.pragma("user_version", { simple: true }) || 0);
+  if (version >= 4) return;
+  addColumn(database, "posts", "reading_minutes INTEGER");
+  ensureFts(database);
+
+  const posts = database.prepare(`
+    SELECT id, title, summary, tags, is_game, published, published_revision_id, category_id
+      FROM posts
+  `).all();
+  const catName = database.prepare("SELECT name FROM categories WHERE id = ?");
+  const updateMinutes = database.prepare("UPDATE posts SET reading_minutes = ? WHERE id = ?");
+
+  const tx = database.transaction(() => {
+    for (const post of posts) {
+      const html = readStoredHtml(post.published_revision_id);
+      const isGame = Number(post.is_game) === 1;
+      const minutes = post.published ? readingMinutesFromHtml(html, isGame) : null;
+      updateMinutes.run(minutes, post.id);
+      if (!post.published) {
+        removePostSearch(database, post.id);
+        continue;
+      }
+      const category = post.category_id ? (catName.get(post.category_id)?.name || "") : "";
+      const tags = parseTags(post.tags).join(" ");
+      upsertPostSearch(database, {
+        id: post.id,
+        title: post.title,
+        summary: post.summary || "",
+        tags,
+        category,
+        body: compactText(html),
+      });
+    }
+    database.pragma("user_version = 4");
+  });
+  tx();
 }
 
 function ensureDefaultCategories(database) {
   const insert = database.prepare(`
     INSERT INTO categories (slug, name, sort_order, created_at)
     VALUES (@slug, @name, @sort_order, @created_at)
-    ON CONFLICT(slug) DO UPDATE SET
-      name = excluded.name,
-      sort_order = excluded.sort_order
+    ON CONFLICT(slug) DO NOTHING
   `);
   for (const cat of DEFAULT_CATEGORIES) {
     insert.run({
@@ -322,6 +377,90 @@ export function ensureCategoryByName(name) {
   return getCategoryById(info.lastInsertRowid);
 }
 
+export function listAdminCategories() {
+  return getDb()
+    .prepare(`
+      SELECT c.id, c.slug, c.name, c.sort_order AS sortOrder,
+             (SELECT COUNT(*) FROM posts p WHERE p.category_id = c.id) AS postCount
+        FROM categories c
+       ORDER BY c.sort_order ASC, c.id ASC
+    `)
+    .all();
+}
+
+export function categoryUsage(id) {
+  const postCount = getDb().prepare("SELECT COUNT(*) AS n FROM posts WHERE category_id = ?").get(id).n;
+  const revisionCount = getDb().prepare("SELECT COUNT(*) AS n FROM post_revisions WHERE category_id = ?").get(id).n;
+  return { postCount, revisionCount };
+}
+
+export function renameCategory(id, name) {
+  const trimmed = String(name || "").trim().slice(0, 20);
+  if (!trimmed) {
+    const error = new Error("请填写专题名称");
+    error.status = 400;
+    throw error;
+  }
+  const current = getCategoryById(id);
+  if (!current) {
+    const error = new Error("专题不存在");
+    error.status = 404;
+    throw error;
+  }
+  const dup = getDb().prepare("SELECT id FROM categories WHERE name = ? AND id != ?").get(trimmed, current.id);
+  if (dup) {
+    const error = new Error("已有同名专题");
+    error.status = 400;
+    throw error;
+  }
+  getDb().prepare("UPDATE categories SET name = ? WHERE id = ?").run(trimmed, current.id);
+  return getCategoryById(current.id);
+}
+
+export function deleteCategory(id) {
+  const current = getCategoryById(id);
+  if (!current) {
+    const error = new Error("专题不存在");
+    error.status = 404;
+    throw error;
+  }
+  const usage = categoryUsage(current.id);
+  if (usage.postCount > 0) {
+    const error = new Error(`还有 ${usage.postCount} 篇文章使用这个专题，请先改到其他分类后再删除`);
+    error.status = 409;
+    throw error;
+  }
+  if (usage.revisionCount > 0) {
+    const error = new Error("还有草稿使用这个专题，请先改到其他分类后再删除");
+    error.status = 409;
+    throw error;
+  }
+  getDb().prepare("DELETE FROM categories WHERE id = ?").run(current.id);
+  return current;
+}
+
+export function reorderCategories(ids) {
+  const list = Array.isArray(ids) ? ids.map((id) => Number(id)) : [];
+  const existing = listCategories();
+  const known = new Set(existing.map((item) => item.id));
+  if (!list.length || list.length !== existing.length || list.some((id) => !Number.isInteger(id) || !known.has(id))) {
+    const error = new Error("排序列表不完整");
+    error.status = 400;
+    throw error;
+  }
+  if (new Set(list).size !== list.length) {
+    const error = new Error("排序列表不完整");
+    error.status = 400;
+    throw error;
+  }
+  const stmt = getDb().prepare("UPDATE categories SET sort_order = ? WHERE id = ?");
+  const tx = getDb().transaction((order) => {
+    order.forEach((catId, index) => stmt.run(index + 1, catId));
+  });
+  tx(list);
+  return listCategories();
+}
+
 export function publicCategory(row) {
   if (!row || (!row.category_slug && !row.category_id && !row.slug)) return null;
   if (row.category_slug || row.category_name) {
@@ -362,6 +501,9 @@ export function publicPost(row, { includeDraft = false } = {}) {
     coverUrl: row.cover_file ? `/media/covers/${row.cover_file}` : null,
     published: Boolean(row.published),
     isGame: Boolean(Number(row.is_game || 0)),
+    readingMinutes: Number(row.is_game || 0)
+      ? null
+      : (row.reading_minutes == null ? null : Number(row.reading_minutes)),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

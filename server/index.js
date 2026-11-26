@@ -18,12 +18,23 @@ import {
   nowIso,
   newPreviewToken,
   listCategories,
+  listAdminCategories,
   getCategoryBySlug,
   getCategoryById,
   ensureCategoryByName,
+  renameCategory,
+  deleteCategory,
+  reorderCategories,
   POST_SELECT,
 } from "./db.js";
 import { buildArticleDocument, compactText, estimateReadingMinutes } from "./html.js";
+import {
+  buildMatchQuery,
+  buildSnippet,
+  readingMinutesFromHtml,
+  removePostSearch,
+  upsertPostSearch,
+} from "./fts.js";
 import { safePasswordEqual, setSession, clearSession, isUnlocked, requireAdmin } from "./auth.js";
 import { seedIfNeeded } from "./seed.js";
 import {
@@ -205,18 +216,149 @@ function feedOrderSql(sort) {
   return "ORDER BY datetime(posts.created_at) DESC, posts.id DESC";
 }
 
-function withReadingMinutes(post, row, { revisionId } = {}) {
-  if (!post) return post;
-  if (post.isGame) {
-    return { ...post, readingMinutes: null };
-  }
-  const id = revisionId ?? row?.published_revision_id;
-  const html = id ? readRevisionHtml(id) : "";
-  return { ...post, readingMinutes: estimateReadingMinutes(compactText(html || "")) };
+const DEFAULT_PAGE_SIZE = 8;
+const MAX_PAGE_SIZE = 30;
+
+function pageParams(query) {
+  const page = Math.max(1, Math.floor(Number(query?.page) || 1));
+  let limit = Math.floor(Number(query?.limit) || DEFAULT_PAGE_SIZE);
+  if (!Number.isFinite(limit) || limit < 1) limit = DEFAULT_PAGE_SIZE;
+  limit = Math.min(MAX_PAGE_SIZE, limit);
+  return { page, limit, offset: (page - 1) * limit };
 }
 
-function publicPostPayload(row) {
-  return withReadingMinutes(publicPost(row), row);
+function pageResult({ posts, total, page, limit, extra = {} }) {
+  return {
+    ...extra,
+    posts,
+    page,
+    limit,
+    total,
+    hasMore: page * limit < total,
+  };
+}
+
+function indexPublishedRow(row) {
+  if (!row?.id || !row.published) return;
+  const html = row.published_revision_id ? (readRevisionHtml(row.published_revision_id) || "") : "";
+  const tags = parseTags(row.tags);
+  const category = getCategoryById(row.category_id)?.name || "";
+  const body = compactText(html);
+  const search = searchTextOf({
+    title: row.title,
+    summary: row.summary,
+    tags,
+    categoryName: category,
+    html,
+  });
+  getDb().prepare("UPDATE posts SET search_text = ? WHERE id = ?").run(search, row.id);
+  if (row.published_revision_id) {
+    getDb().prepare("UPDATE post_revisions SET search_text = ? WHERE id = ?").run(search, row.published_revision_id);
+  }
+  upsertPostSearch(getDb(), {
+    id: row.id,
+    title: row.title,
+    summary: row.summary || "",
+    tags: tags.join(" "),
+    category,
+    body,
+  });
+}
+
+function reindexPublishedInCategory(categoryId) {
+  const rows = getDb().prepare("SELECT * FROM posts WHERE published = 1 AND category_id = ?").all(categoryId);
+  for (const row of rows) indexPublishedRow(row);
+}
+
+function listPublished({ whereSql, params, sort, pageQuery }) {
+  const { page, limit, offset } = pageParams(pageQuery);
+  const total = getDb().prepare(`SELECT COUNT(*) AS n FROM posts WHERE ${whereSql}`).get(...params).n;
+  const rows = getDb()
+    .prepare(`${POST_SELECT} WHERE ${whereSql} ${feedOrderSql(sort)} LIMIT ? OFFSET ?`)
+    .all(...params, limit, offset);
+  return pageResult({
+    posts: rows.map((row) => publicPost(row)).filter(Boolean),
+    total,
+    page,
+    limit,
+    extra: { sort: parseFeedSort(sort) },
+  });
+}
+
+function neighborPost(row, direction) {
+  const newer = direction === "newer";
+  const sql = newer
+    ? `${POST_SELECT}
+        WHERE posts.published = 1
+          AND (
+            datetime(posts.created_at) > datetime(@created)
+            OR (datetime(posts.created_at) = datetime(@created) AND posts.id > @id)
+          )
+        ORDER BY datetime(posts.created_at) ASC, posts.id ASC
+        LIMIT 1`
+    : `${POST_SELECT}
+        WHERE posts.published = 1
+          AND (
+            datetime(posts.created_at) < datetime(@created)
+            OR (datetime(posts.created_at) = datetime(@created) AND posts.id < @id)
+          )
+        ORDER BY datetime(posts.created_at) DESC, posts.id DESC
+        LIMIT 1`;
+  const found = getDb().prepare(sql).get({ created: row.created_at, id: row.id });
+  if (!found) return null;
+  return {
+    slug: found.slug,
+    title: found.title,
+    isGame: Boolean(Number(found.is_game || 0)),
+  };
+}
+
+function relatedPosts(row, limit = 4) {
+  const tags = parseTags(row.tags);
+  let rows = [];
+  try {
+    if (tags.length) {
+      rows = getDb().prepare(`
+        ${POST_SELECT}
+        WHERE posts.published = 1
+          AND posts.id != ?
+          AND (
+            (? IS NOT NULL AND posts.category_id = ?)
+            OR EXISTS (
+              SELECT 1 FROM json_each(posts.tags) AS jt
+              WHERE jt.value IN (SELECT value FROM json_each(?))
+            )
+          )
+      `).all(row.id, row.category_id ?? null, row.category_id ?? null, JSON.stringify(tags));
+    } else if (row.category_id) {
+      rows = getDb().prepare(`
+        ${POST_SELECT}
+        WHERE posts.published = 1 AND posts.id != ? AND posts.category_id = ?
+      `).all(row.id, row.category_id);
+    }
+  } catch {
+    return [];
+  }
+  return rows
+    .map((item) => {
+      const itemTags = parseTags(item.tags);
+      const overlap = itemTags.filter((tag) => tags.includes(tag)).length;
+      const sameCategory = row.category_id && Number(item.category_id) === Number(row.category_id) ? 1 : 0;
+      return { item, score: sameCategory * 3 + overlap * 2 };
+    })
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score || String(b.item.created_at).localeCompare(String(a.item.created_at)) || b.item.id - a.item.id)
+    .slice(0, limit)
+    .map((entry) => publicPost(entry.item))
+    .filter(Boolean);
+}
+
+function previewReading(post, row) {
+  if (!post) return post;
+  if (post.isGame) return { ...post, readingMinutes: null };
+  const id = row.draft_revision_id || row.published_revision_id;
+  const html = id ? readRevisionHtml(id) : "";
+  return { ...post, readingMinutes: estimateReadingMinutes(compactText(html || "")) };
 }
 
 function resolveCategoryId(body) {
@@ -290,14 +432,13 @@ function resolveCover({ file, assetRel, revisionId }) {
   return undefined;
 }
 
-function toAdmin(row) {
+function toAdmin(row, { withPreviewReading = false } = {}) {
   if (!row) return null;
   const post = adminPost(row, {
     liveAssets: row.published_revision_id ? listAssets(row.published_revision_id) : [],
     draftAssets: row.draft_revision_id ? listAssets(row.draft_revision_id) : [],
   });
-  const revisionId = row.draft_revision_id || row.published_revision_id;
-  return withReadingMinutes(post, row, { revisionId });
+  return withPreviewReading ? previewReading(post, row) : post;
 }
 
 function parseAssetPaths(req) {
@@ -495,7 +636,9 @@ function publishPost(postId) {
   if (!post.draft_revision_id) throw new Error("没有可发布的草稿");
   const draft = getDb().prepare("SELECT * FROM post_revisions WHERE id = ?").get(post.draft_revision_id);
   if (!draft) throw new Error("没有可发布的草稿");
-  if (!readRevisionHtml(draft.id)) throw new Error("草稿还没有正文，请先上传 HTML");
+  const draftHtml = readRevisionHtml(draft.id);
+  if (!draftHtml) throw new Error("草稿还没有正文，请先上传 HTML");
+  const minutes = readingMinutesFromHtml(draftHtml, Number(draft.is_game) === 1);
   const oldPublished = post.published_revision_id;
   getDb().prepare(`
     UPDATE posts SET
@@ -509,6 +652,7 @@ function publishPost(postId) {
       search_text = ?,
       category_id = ?,
       is_game = ?,
+      reading_minutes = ?,
       updated_at = ?
     WHERE id = ?
   `).run(
@@ -521,6 +665,7 @@ function publishPost(postId) {
     draft.search_text,
     draft.category_id,
     Number(draft.is_game || 0) ? 1 : 0,
+    minutes,
     nowIso(),
     postId
   );
@@ -528,18 +673,24 @@ function publishPost(postId) {
     removeRevisionDir(oldPublished);
     getDb().prepare("DELETE FROM post_revisions WHERE id = ?").run(oldPublished);
   }
+  indexPublishedRow(getDb().prepare("SELECT * FROM posts WHERE id = ?").get(postId));
   const leftover = getDb().prepare("SELECT cover_file FROM post_revisions WHERE post_id = ?").all(postId);
   unusedCover(post.cover_file, postId);
   for (const row of leftover) unusedCover(row.cover_file);
   return getPostById(postId);
 }
 
-function sendArticleDocument(res, revisionId, title, { cache = "private, no-store" } = {}) {
+function articleTheme(value) {
+  if (value === "dark" || value === "light") return value;
+  return "";
+}
+
+function sendArticleDocument(res, revisionId, title, { cache = "private, no-store", theme = "" } = {}) {
   const raw = readRevisionHtml(revisionId);
   if (raw == null) {
     return res.status(404).type("html").send("<!DOCTYPE html><title>未找到</title><p>正文文件缺失</p>");
   }
-  const html = buildArticleDocument(raw, { title });
+  const html = buildArticleDocument(raw, { title, theme: articleTheme(theme) });
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.setHeader("Content-Security-Policy", "frame-ancestors 'self'");
   res.setHeader("X-Content-Type-Options", "nosniff");
@@ -549,16 +700,16 @@ function sendArticleDocument(res, revisionId, title, { cache = "private, no-stor
   return res.send(html);
 }
 
-function sendRevisionAsset(res, revisionId, rel, { cache, title }) {
+function sendRevisionAsset(res, revisionId, rel, { cache, title, theme }) {
   const clean = (rel || "").replace(/\\/g, "/").replace(/^\/+/, "");
   if (!clean || clean === "index.html" || clean === "index.htm") {
-    return sendArticleDocument(res, revisionId, title, { cache });
+    return sendArticleDocument(res, revisionId, title, { cache, theme });
   }
   const full = resolveAsset(revisionId, clean);
   if (!full) return res.status(404).type("text").send("未找到附件");
   if (isHtmlPath(clean)) {
     const raw = fs.readFileSync(full, "utf8");
-    const html = buildArticleDocument(raw, { title: path.basename(clean) });
+    const html = buildArticleDocument(raw, { title: path.basename(clean), theme: articleTheme(theme) });
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.setHeader("Content-Security-Policy", "frame-ancestors 'self'");
     res.setHeader("X-Content-Type-Options", "nosniff");
@@ -589,6 +740,7 @@ app.use("/media/articles/:slug/live", (req, res) => {
   return sendRevisionAsset(res, row.published_revision_id, rel, {
     cache: "public, max-age=300",
     title: row.title,
+    theme: articleTheme(req.query.theme),
   });
 });
 
@@ -609,6 +761,7 @@ app.use("/media/articles/:slug/p/:token", (req, res) => {
   return sendRevisionAsset(res, row.draft_revision_id, rel, {
     cache: "private, no-store",
     title: draft?.title || row.title,
+    theme: articleTheme(req.query.theme),
   });
 });
 
@@ -626,60 +779,120 @@ app.get("/api/categories/:slug", (req, res) => {
   const category = getCategoryBySlug(req.params.slug);
   if (!category) return res.status(404).json({ error: "专题不存在" });
   const sort = parseFeedSort(req.query.sort);
-  const rows = getDb()
-    .prepare(
-      `${POST_SELECT} WHERE posts.published = 1 AND posts.category_id = ? ${feedOrderSql(sort)}`
-    )
-    .all(category.id);
-  res.json({ category, posts: rows.map((row) => publicPostPayload(row)), sort });
+  const result = listPublished({
+    whereSql: "posts.published = 1 AND posts.category_id = ?",
+    params: [category.id],
+    sort,
+    pageQuery: req.query,
+  });
+  res.json({ ...result, category });
+});
+
+app.get("/api/tags/:name", (req, res) => {
+  const name = String(req.params.name || "").trim();
+  if (!name || name.length > 20) return res.status(404).json({ error: "标签不存在" });
+  const sort = parseFeedSort(req.query.sort);
+  const result = listPublished({
+    whereSql: "posts.published = 1 AND EXISTS (SELECT 1 FROM json_each(posts.tags) AS jt WHERE jt.value = ?)",
+    params: [name],
+    sort,
+    pageQuery: req.query,
+  });
+  res.json({ ...result, tag: name });
 });
 
 app.get("/api/posts", (req, res) => {
+  if (req.query.slugs != null) {
+    const slugs = [...new Set(String(req.query.slugs).split(",").map((item) => item.trim()).filter(Boolean))].slice(0, 100);
+    if (!slugs.length) {
+      return res.json(pageResult({ posts: [], total: 0, page: 1, limit: 0 }));
+    }
+    const placeholders = slugs.map(() => "?").join(",");
+    const rows = getDb()
+      .prepare(`${POST_SELECT} WHERE posts.published = 1 AND posts.slug IN (${placeholders})`)
+      .all(...slugs);
+    const bySlug = new Map(rows.map((row) => [row.slug, publicPost(row)]));
+    const posts = slugs.map((slug) => bySlug.get(slug)).filter(Boolean);
+    return res.json(pageResult({ posts, total: posts.length, page: 1, limit: posts.length || 1 }));
+  }
   const slug = String(req.query.category || "").trim();
   const sort = parseFeedSort(req.query.sort);
-  let rows;
   if (slug) {
     const category = getCategoryBySlug(slug);
-    if (!category) return res.json({ posts: [], category: null, sort });
-    rows = getDb()
-      .prepare(
-        `${POST_SELECT} WHERE posts.published = 1 AND posts.category_id = ? ${feedOrderSql(sort)}`
-      )
-      .all(category.id);
-    return res.json({ posts: rows.map((row) => publicPostPayload(row)), category, sort });
+    if (!category) {
+      const { page, limit } = pageParams(req.query);
+      return res.json(pageResult({ posts: [], total: 0, page, limit, extra: { category: null, sort } }));
+    }
+    const result = listPublished({
+      whereSql: "posts.published = 1 AND posts.category_id = ?",
+      params: [category.id],
+      sort,
+      pageQuery: req.query,
+    });
+    return res.json({ ...result, category });
   }
-  rows = getDb()
-    .prepare(
-      `${POST_SELECT} WHERE posts.published = 1 ${feedOrderSql(sort)}`
-    )
-    .all();
-  res.json({ posts: rows.map((row) => publicPostPayload(row)), sort });
+  const result = listPublished({
+    whereSql: "posts.published = 1",
+    params: [],
+    sort,
+    pageQuery: req.query,
+  });
+  res.json(result);
 });
 
 app.get("/api/search", (req, res) => {
   const q = String(req.query.q || "").trim();
-  if (!q) return res.json({ posts: [], query: q });
-  const keywords = q.split(/\s+/).filter(Boolean).slice(0, 6);
-  let sql = `${POST_SELECT} WHERE posts.published = 1`;
-  const params = [];
-  for (const word of keywords) {
-    sql += " AND (posts.title LIKE ? OR posts.summary LIKE ? OR posts.tags LIKE ? OR posts.search_text LIKE ? OR IFNULL(c.name, '') LIKE ?)";
-    const like = `%${word}%`;
-    params.push(like, like, like, like, like);
+  const { page, limit, offset } = pageParams(req.query);
+  if (!q) return res.json(pageResult({ posts: [], total: 0, page, limit, extra: { query: q } }));
+  const match = buildMatchQuery(q);
+  if (!match) return res.json(pageResult({ posts: [], total: 0, page, limit, extra: { query: q } }));
+  try {
+    const total = getDb().prepare(`
+      SELECT COUNT(*) AS n
+        FROM posts_fts
+        JOIN posts ON posts.id = posts_fts.rowid
+       WHERE posts.published = 1 AND posts_fts MATCH ?
+    `).get(match).n;
+    const ids = getDb().prepare(`
+      SELECT posts.id
+        FROM posts_fts
+        JOIN posts ON posts.id = posts_fts.rowid
+       WHERE posts.published = 1 AND posts_fts MATCH ?
+       ORDER BY datetime(posts.created_at) DESC, posts.id DESC
+       LIMIT ? OFFSET ?
+    `).all(match, limit, offset);
+    const posts = ids.map(({ id }) => {
+      const row = getPostById(id);
+      const post = publicPost(row);
+      if (!post) return null;
+      return { ...post, snippet: buildSnippet(row.search_text, q) };
+    }).filter(Boolean);
+    res.json(pageResult({ posts, total, page, limit, extra: { query: q } }));
+  } catch (err) {
+    console.error(err);
+    res.status(400).json({ error: "搜索词无法解析" });
   }
-  sql += " ORDER BY datetime(posts.created_at) DESC, posts.id DESC";
-  const rows = getDb().prepare(sql).all(...params);
-  res.json({ posts: rows.map((row) => publicPostPayload(row)), query: q });
 });
 
 app.get("/api/posts/:slug", (req, res) => {
   const row = getPostBySlug(req.params.slug);
   if (!row || !row.published) return res.status(404).json({ error: "文章不存在" });
+  const post = publicPost(row);
+  let readingMinutes = post.readingMinutes;
+  if (!post.isGame && readingMinutes == null) {
+    const html = row.published_revision_id ? (readRevisionHtml(row.published_revision_id) || "") : "";
+    readingMinutes = estimateReadingMinutes(compactText(html));
+    getDb().prepare("UPDATE posts SET reading_minutes = ? WHERE id = ?").run(readingMinutes, row.id);
+  }
   res.json({
     post: {
-      ...publicPostPayload(row),
+      ...post,
+      readingMinutes: post.isGame ? null : readingMinutes,
       contentUrl: `/media/articles/${row.slug}/live/`,
     },
+    prev: neighborPost(row, "older"),
+    next: neighborPost(row, "newer"),
+    related: relatedPosts(row),
   });
 });
 
@@ -715,7 +928,7 @@ app.post("/api/admin/lock", (req, res) => {
 });
 
 app.get("/api/admin/categories", requireAdmin, (_req, res) => {
-  res.json({ categories: listCategories() });
+  res.json({ categories: listAdminCategories() });
 });
 
 app.post("/api/admin/categories", requireAdmin, (req, res) => {
@@ -723,7 +936,35 @@ app.post("/api/admin/categories", requireAdmin, (req, res) => {
   if (!name) return res.status(400).json({ error: "请填写分类名称" });
   if (name.length > 20) return res.status(400).json({ error: "分类名称请控制在 20 字以内" });
   const category = ensureCategoryByName(name);
-  res.status(201).json({ category });
+  res.status(201).json({ category, categories: listAdminCategories() });
+});
+
+app.put("/api/admin/categories/order", requireAdmin, (req, res) => {
+  try {
+    reorderCategories(req.body?.ids);
+    res.json({ categories: listAdminCategories() });
+  } catch (err) {
+    res.status(err.status || 400).json({ error: err.message || "排序失败" });
+  }
+});
+
+app.patch("/api/admin/categories/:id", requireAdmin, (req, res) => {
+  try {
+    const updated = renameCategory(Number(req.params.id), req.body?.name);
+    reindexPublishedInCategory(updated.id);
+    res.json({ category: updated, categories: listAdminCategories() });
+  } catch (err) {
+    res.status(err.status || 400).json({ error: err.message || "改名失败" });
+  }
+});
+
+app.delete("/api/admin/categories/:id", requireAdmin, (req, res) => {
+  try {
+    deleteCategory(Number(req.params.id));
+    res.json({ ok: true, categories: listAdminCategories() });
+  } catch (err) {
+    res.status(err.status || 400).json({ error: err.message || "删除失败" });
+  }
 });
 
 // ---------- admin posts ----------
@@ -732,19 +973,19 @@ app.get("/api/admin/posts", requireAdmin, (_req, res) => {
   const rows = getDb()
     .prepare(`${POST_SELECT} ORDER BY datetime(posts.created_at) DESC, posts.id DESC`)
     .all();
-  res.json({ posts: rows.map((row) => toAdmin(row)), categories: listCategories() });
+  res.json({ posts: rows.map((row) => toAdmin(row)), categories: listAdminCategories() });
 });
 
 app.get("/api/admin/posts/slug/:slug", requireAdmin, (req, res) => {
   const row = getPostBySlug(req.params.slug);
   if (!row) return res.status(404).json({ error: "文章不存在" });
-  res.json({ post: toAdmin(row) });
+  res.json({ post: toAdmin(row, { withPreviewReading: true }) });
 });
 
 app.get("/api/admin/posts/:id", requireAdmin, (req, res) => {
   const row = getPostById(Number(req.params.id));
   if (!row) return res.status(404).json({ error: "文章不存在" });
-  res.json({ post: toAdmin(row) });
+  res.json({ post: toAdmin(row, { withPreviewReading: true }) });
 });
 
 app.post("/api/admin/posts", requireAdmin, formUpload, async (req, res) => {
@@ -898,6 +1139,7 @@ app.post("/api/admin/posts/:id/unpublish", requireAdmin, (req, res) => {
   const row = getPostById(Number(req.params.id));
   if (!row) return res.status(404).json({ error: "文章不存在" });
   getDb().prepare("UPDATE posts SET published = 0, updated_at = ? WHERE id = ?").run(nowIso(), row.id);
+  removePostSearch(getDb(), row.id);
   res.json({ post: toAdmin(getPostById(row.id)) });
 });
 
@@ -905,6 +1147,7 @@ app.delete("/api/admin/posts/:id", requireAdmin, (req, res) => {
   const row = getDb().prepare("SELECT * FROM posts WHERE id = ?").get(Number(req.params.id));
   if (!row) return res.status(404).json({ error: "文章不存在" });
   const revs = getDb().prepare("SELECT id, cover_file FROM post_revisions WHERE post_id = ?").all(row.id);
+  removePostSearch(getDb(), row.id);
   getDb().prepare("DELETE FROM posts WHERE id = ?").run(row.id);
   for (const rev of revs) {
     removeRevisionDir(rev.id);

@@ -1,4 +1,5 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
+import { useTheme } from "../hooks/useTheme.jsx";
 
 function findScrollParent(node) {
   let current = node?.parentElement;
@@ -11,7 +12,24 @@ function findScrollParent(node) {
   return document.scrollingElement || document.documentElement;
 }
 
+function withTheme(src, theme) {
+  if (!src) return "";
+  try {
+    const url = new URL(src, window.location.origin);
+    url.searchParams.set("theme", theme === "dark" ? "dark" : "light");
+    return `${url.pathname}${url.search}`;
+  } catch {
+    return src;
+  }
+}
+
 const ArticleFrame = forwardRef(function ArticleFrame({ src, title = "文章正文", onViewportMode, onOutline }, ref) {
+  const { resolved } = useTheme();
+  const themeForSrc = useRef({ src: "", theme: resolved });
+  if (themeForSrc.current.src !== src) {
+    themeForSrc.current = { src, theme: resolved };
+  }
+  const framedSrc = withTheme(src, themeForSrc.current.theme);
   const iframeRef = useRef(null);
   const onModeRef = useRef(onViewportMode);
   const onOutlineRef = useRef(onOutline);
@@ -95,16 +113,32 @@ const ArticleFrame = forwardRef(function ArticleFrame({ src, title = "文章正�
     return () => window.removeEventListener("message", onMessage);
   }, [src]);
 
-  if (!src) return null;
+  useEffect(() => {
+    const postTheme = (theme) => {
+      iframeRef.current?.contentWindow?.postMessage({ type: "article-theme", theme }, "*");
+    };
+    const onLoad = () => postTheme(resolved);
+    const onTheme = (event) => postTheme(event.detail || resolved);
+    const frame = iframeRef.current;
+    frame?.addEventListener("load", onLoad);
+    window.addEventListener("blog-theme", onTheme);
+    postTheme(resolved);
+    return () => {
+      frame?.removeEventListener("load", onLoad);
+      window.removeEventListener("blog-theme", onTheme);
+    };
+  }, [framedSrc, resolved]);
+
+  if (!framedSrc) return null;
 
   const fill = mode === "viewport";
 
   return (
     <iframe
       ref={iframeRef}
-      key={src}
+      key={framedSrc}
       title={title}
-      src={src}
+      src={framedSrc}
       sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"
       referrerPolicy="no-referrer"
       className={fill ? "is-app-frame" : undefined}

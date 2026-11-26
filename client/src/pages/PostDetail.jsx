@@ -6,8 +6,10 @@ import GamePlayer from "../components/GamePlayer.jsx";
 import HeartButton from "../components/HeartButton.jsx";
 import TableOfContents from "../components/TableOfContents.jsx";
 import EmptyState from "../components/EmptyState.jsx";
+import ThemeToggle from "../components/ThemeToggle.jsx";
 import { useFavorites } from "../hooks/useFavorites.js";
 import { useConfig } from "../hooks/useConfig.js";
+import useReadingProgress from "../hooks/useReadingProgress.js";
 
 export default function PostDetail({ preview = false }) {
   const { slug } = useParams();
@@ -16,16 +18,21 @@ export default function PostDetail({ preview = false }) {
   const { siteName } = useConfig();
   const { has, toggle } = useFavorites();
   const frameRef = useRef(null);
+  const bodyRef = useRef(null);
   const [post, setPost] = useState(null);
+  const [neighbors, setNeighbors] = useState({ prev: null, next: null, related: [] });
   const [error, setError] = useState("");
   const [frameSrc, setFrameSrc] = useState("");
   const [viewportApp, setViewportApp] = useState(false);
   const [headings, setHeadings] = useState([]);
   const [tocOpen, setTocOpen] = useState(false);
+  const trackProgress = Boolean(post) && !post.isGame && !preview && !viewportApp;
+  const restored = useReadingProgress(post?.slug, bodyRef, trackProgress);
 
   useEffect(() => {
     let cancelled = false;
     setPost(null);
+    setNeighbors({ prev: null, next: null, related: [] });
     setError("");
     setFrameSrc("");
     setViewportApp(false);
@@ -51,6 +58,11 @@ export default function PostDetail({ preview = false }) {
           setFrameSrc(row.previewUrl || api.previewContentUrl(row.slug, row.previewToken));
         } else {
           setPost(row);
+          setNeighbors({
+            prev: data.prev || null,
+            next: data.next || null,
+            related: data.related || [],
+          });
           setFrameSrc(row.contentUrl || api.contentUrl(row.slug));
         }
       })
@@ -102,7 +114,7 @@ export default function PostDetail({ preview = false }) {
   return (
     <div className="app-root">
       <div className="app-frame wide">
-        <div className={`frame-body${viewportApp ? " is-app-post" : ""}`}>
+        <div className={`frame-body${viewportApp ? " is-app-post" : ""}`} ref={bodyRef}>
           <div className="detail-top">
             <button type="button" className="icon-btn" onClick={goBack} aria-label="返回">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
@@ -122,12 +134,14 @@ export default function PostDetail({ preview = false }) {
             ) : (
               <span />
             )}
-            {post && !preview ? (
-              <HeartButton on={has(post.slug)} onToggle={() => toggle(post.slug)} />
-            ) : (
-              <span />
-            )}
+            <div className="detail-actions">
+              <ThemeToggle />
+              {post && !preview ? (
+                <HeartButton on={has(post.slug)} onToggle={() => toggle(post.slug)} />
+              ) : null}
+            </div>
           </div>
+          {restored && !preview && !viewportApp ? <p className="resume-note">已回到上次读到的位置</p> : null}
           {error ? (
             <main className="page">
               <EmptyState mark="空" title="找不到文章">{error}<br /><Link to={preview ? "/admin" : "/"}>{preview ? "回到后台" : "回到首页"}</Link></EmptyState>
@@ -157,7 +171,7 @@ export default function PostDetail({ preview = false }) {
                   <time dateTime={post.createdAt}>{formatDate(post.createdAt)}</time>
                   {reading ? <span>{reading}</span> : null}
                   {(post.tags || []).map((tag) => (
-                    <span className="tag" key={tag}>{tag}</span>
+                    <Link className="tag" key={tag} to={`/tag/${encodeURIComponent(tag)}`}>{tag}</Link>
                   ))}
                 </div>
               </header>
@@ -170,6 +184,37 @@ export default function PostDetail({ preview = false }) {
                   onOutline={setHeadings}
                 />
               </div>
+              {!preview && (neighbors.prev || neighbors.next) ? (
+                <nav className="post-neighbors" aria-label="前后文章">
+                  {neighbors.prev ? (
+                    <Link className="post-neighbor" to={`/post/${neighbors.prev.slug}`}>
+                      <small>上一篇</small>
+                      <strong>{neighbors.prev.title}</strong>
+                    </Link>
+                  ) : <span />}
+                  {neighbors.next ? (
+                    <Link className="post-neighbor" to={`/post/${neighbors.next.slug}`}>
+                      <small>下一篇</small>
+                      <strong>{neighbors.next.title}</strong>
+                    </Link>
+                  ) : null}
+                </nav>
+              ) : null}
+              {!preview && neighbors.related.length ? (
+                <section className="related-block">
+                  <h2>相关阅读</h2>
+                  <div className="related-list">
+                    {neighbors.related.map((item) => (
+                      <Link key={item.slug} to={`/post/${item.slug}`}>
+                        <strong>{item.title}</strong>
+                        <div className="meta">
+                          {[item.category?.name, ...(item.tags || []).slice(0, 3)].filter(Boolean).join(" · ")}
+                        </div>
+                      </Link>
+                    ))}
+                  </div>
+                </section>
+              ) : null}
             </>
           )}
         </div>

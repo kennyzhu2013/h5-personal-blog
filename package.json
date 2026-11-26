@@ -1,7 +1,7 @@
 {
   "name": "h5-personal-blog",
   "private": true,
-  "version": "4.0.0",
+  "version": "5.0.0",
   "description": "个人博客 / 内容 App：上传 HTML5 发文",
   "type": "module",
   "scripts": {
